@@ -2,6 +2,8 @@ module github.com/myplixa/yandex-cloud-fleeting-plugin
 
 go 1.26.0
 
+toolchain go1.26.10
+
 require (
 	github.com/ghodss/yaml v1.0.0
 	github.com/google/uuid v1.6.0
@@ -25,7 +27,7 @@ require (
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/oklog/run v1.2.0 // indirect
 	golang.org/x/mod v0.41.0 // indirect
-	golang.org/x/net v0.59.0 // indirect
+	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
 	google.golang.org/genproto v0.0.0-20260908043556-f8649ddbbfe6 // indirect
