@@ -87,7 +87,7 @@ ignored once `zones`/`subnets` are set.
 
 Two service accounts, different jobs:
 
-- **`serviceAccount`** is attached to the *management VM itself* — the plugin authenticates to the YC API via `ycsdk.InstanceServiceAccount()`, which reads credentials from the VM's own attached SA through the metadata service. Attaching this SA to an already-running management VM needs a full **stop + start**, not `restart` — a soft reboot doesn't refresh the metadata service's view of the attached SA.
+- **`serviceAccount`** is attached to the *management VM itself* — the plugin authenticates to the YC API via `ycsdk.InstanceServiceAccount()`, which reads credentials from the VM's own attached SA through the metadata service. Attaching this SA to an already-running management VM needs a full **stop + start**, not `restart` — a soft reboot doesn't refresh the metadata service's view of the attached SA. If the plugin does not run on a YC VM, set `key_file` instead (see [Running outside Yandex Cloud](#running-outside-yandex-cloud)): the plugin then authenticates with that service account's authorized key and the metadata service is not used.
 - **`vmServiceAccount`** is attached to each *spawned runner VM*.
 
 Required grants (found empirically — YC's `PermissionDenied` errors here carry no detail on which permission is missing):
