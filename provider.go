@@ -14,6 +14,7 @@ import (
 	"github.com/hashicorp/go-hclog"
 	"github.com/yandex-cloud/go-genproto/yandex/cloud/compute/v1/instancegroup"
 	ycsdk "github.com/yandex-cloud/go-sdk"
+	"github.com/yandex-cloud/go-sdk/iamkey"
 	"gitlab.com/gitlab-org/fleeting/fleeting/provider"
 	"google.golang.org/protobuf/types/known/fieldmaskpb"
 )
@@ -25,6 +26,9 @@ type InstanceGroup struct {
 	Name               string `json:"name"`
 	ConfigInstanceFile string `json:"config_file"`
 	SshPrivateKeyFile  string `json:"ssh_file,omitempty"`
+	// KeyFile is an authorized key of a service account in the JSON format
+	// written by `yc iam key create --output`. See credentials.
+	KeyFile string `json:"key_file,omitempty"`
 
 	SshPublicKey    string
 	InstanceGroupId string
@@ -210,11 +214,38 @@ func (g *InstanceGroup) GenerateLabels() map[string]string {
 	return labels
 }
 
+// credentials picks how the plugin authenticates to the YC API: with the
+// service account key from key_file when it is set, so the plugin can run
+// outside Yandex Cloud, otherwise with the service account attached to the
+// VM the plugin runs on, read from the metadata service.
+func (g *InstanceGroup) credentials() (ycsdk.Credentials, error) {
+	if g.KeyFile == "" {
+		return ycsdk.InstanceServiceAccount(), nil
+	}
+
+	key, err := iamkey.ReadFromJSONFile(g.KeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("reading key_file %q: %w", g.KeyFile, err)
+	}
+
+	creds, err := ycsdk.ServiceAccountKey(key)
+	if err != nil {
+		return nil, fmt.Errorf("key_file %q is not a usable service account key: %w", g.KeyFile, err)
+	}
+
+	return creds, nil
+}
+
 func (g *InstanceGroup) Init(ctx context.Context, logger hclog.Logger, settings provider.Settings) (provider.ProviderInfo, error) {
 	g.logger = logger
 
+	creds, err := g.credentials()
+	if err != nil {
+		return provider.ProviderInfo{}, err
+	}
+
 	sdk, err := ycsdk.Build(ctx, ycsdk.Config{
-		Credentials: ycsdk.InstanceServiceAccount(),
+		Credentials: creds,
 	})
 
 	if err != nil {

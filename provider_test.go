@@ -1,10 +1,21 @@
 package fleeting_plugin_yc
 
 import (
+	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
+	"encoding/pem"
 	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/hashicorp/go-hclog"
+	ycsdk "github.com/yandex-cloud/go-sdk"
 	"gitlab.com/gitlab-org/fleeting/fleeting/provider"
 )
 
@@ -109,4 +120,165 @@ func TestGenerateMeta_MonitoringPlusExtra_MergesAsMultipart(t *testing.T) {
 	if !strings.Contains(userData, "boundary") && !strings.Contains(userData, "--") {
 		t.Fatalf("expected multipart MIME framing when merging 2 parts, got: %q", userData)
 	}
+}
+
+// TestCredentials_DefaultsToInstanceServiceAccount guards backward
+// compatibility: without key_file the plugin keeps authenticating via the
+// metadata service of the VM it runs on.
+func TestCredentials_DefaultsToInstanceServiceAccount(t *testing.T) {
+	g := &InstanceGroup{}
+
+	creds, err := g.credentials()
+	if err != nil {
+		t.Fatalf("credentials() without key_file: %v", err)
+	}
+
+	want := reflect.TypeOf(ycsdk.InstanceServiceAccount())
+	if got := reflect.TypeOf(creds); got != want {
+		t.Fatalf("credentials() without key_file returned %v, want %v", got, want)
+	}
+}
+
+// TestCredentials_KeyFileSignsJWTForServiceAccount checks that key_file
+// switches the plugin to the service account key: the IAM token request is a
+// JWT issued by that service account and signed with that key. Building the
+// request only signs the JWT locally - nothing is sent to Yandex Cloud.
+func TestCredentials_KeyFileSignsJWTForServiceAccount(t *testing.T) {
+	path := writeServiceAccountKey(t, map[string]string{
+		"id":                 "ajekeyid",
+		"service_account_id": "ajesaid",
+		"key_algorithm":      "RSA_2048",
+		"private_key":        newPrivateKeyPEM(t),
+	})
+	g := &InstanceGroup{KeyFile: path}
+
+	creds, err := g.credentials()
+	if err != nil {
+		t.Fatalf("credentials() with key_file: %v", err)
+	}
+
+	exchangeable, ok := creds.(ycsdk.ExchangeableCredentials)
+	if !ok {
+		t.Fatalf("credentials() with key_file returned %T, want service account key credentials", creds)
+	}
+	req, err := exchangeable.IAMTokenRequest()
+	if err != nil {
+		t.Fatalf("IAMTokenRequest(): %v", err)
+	}
+
+	segments := strings.Split(req.GetJwt(), ".")
+	if len(segments) != 3 {
+		t.Fatalf("expected a signed JWT in the IAM token request, got %q", req.GetJwt())
+	}
+	if kid := decodeJWTSegment(t, segments[0])["kid"]; kid != "ajekeyid" {
+		t.Fatalf("JWT kid = %v, want the key id from key_file", kid)
+	}
+	if iss := decodeJWTSegment(t, segments[1])["iss"]; iss != "ajesaid" {
+		t.Fatalf("JWT iss = %v, want the service account id from key_file", iss)
+	}
+}
+
+func TestCredentials_KeyFileErrors(t *testing.T) {
+	validPEM := newPrivateKeyPEM(t)
+
+	cases := []struct {
+		name    string
+		content string // empty means the file does not exist
+	}{
+		{name: "missing file"},
+		{name: "not JSON", content: "not a key"},
+		{name: "user account key", content: keyJSON(t, map[string]string{
+			"id":              "ajekeyid",
+			"user_account_id": "ajeuserid",
+			"private_key":     validPEM,
+		})},
+		{name: "no key id", content: keyJSON(t, map[string]string{
+			"service_account_id": "ajesaid",
+			"private_key":        validPEM,
+		})},
+		{name: "broken private key", content: keyJSON(t, map[string]string{
+			"id":                 "ajekeyid",
+			"service_account_id": "ajesaid",
+			"private_key":        "-----BEGIN PRIVATE KEY-----\nbroken\n-----END PRIVATE KEY-----\n",
+		})},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "key.json")
+			if tc.content != "" {
+				if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
+					t.Fatalf("writing fixture: %v", err)
+				}
+			}
+			g := &InstanceGroup{KeyFile: path}
+
+			creds, err := g.credentials()
+			if err == nil {
+				t.Fatalf("expected an error, got credentials %T", creds)
+			}
+			if !strings.Contains(err.Error(), "key_file") {
+				t.Fatalf("error should name the key_file setting, got: %v", err)
+			}
+		})
+	}
+}
+
+// TestInit_ReturnsKeyFileError checks that a bad key_file fails Init with an
+// error, before the plugin tries to reach Yandex Cloud.
+func TestInit_ReturnsKeyFileError(t *testing.T) {
+	g := &InstanceGroup{KeyFile: filepath.Join(t.TempDir(), "missing.json")}
+
+	_, err := g.Init(context.Background(), hclog.NewNullLogger(), provider.Settings{})
+	if err == nil || !strings.Contains(err.Error(), "key_file") {
+		t.Fatalf("expected a key_file error from Init, got: %v", err)
+	}
+}
+
+// newPrivateKeyPEM returns a fresh RSA key in the shape `yc iam key create`
+// writes: a PKCS#8 PEM block preceded by the "PLEASE DO NOT REMOVE THIS LINE!"
+// line current yc versions put in front of it.
+func newPrivateKeyPEM(t *testing.T) string {
+	t.Helper()
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generating RSA key: %v", err)
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(priv)
+	if err != nil {
+		t.Fatalf("marshalling RSA key: %v", err)
+	}
+	block := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
+	return "PLEASE DO NOT REMOVE THIS LINE! Yandex.Cloud SA Key ID <ajekeyid>\n" + string(block)
+}
+
+func keyJSON(t *testing.T, fields map[string]string) string {
+	t.Helper()
+	raw, err := json.Marshal(fields)
+	if err != nil {
+		t.Fatalf("marshalling key fixture: %v", err)
+	}
+	return string(raw)
+}
+
+func writeServiceAccountKey(t *testing.T, fields map[string]string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "key.json")
+	if err := os.WriteFile(path, []byte(keyJSON(t, fields)), 0o600); err != nil {
+		t.Fatalf("writing key fixture: %v", err)
+	}
+	return path
+}
+
+func decodeJWTSegment(t *testing.T, segment string) map[string]any {
+	t.Helper()
+	raw, err := base64.RawURLEncoding.DecodeString(segment)
+	if err != nil {
+		t.Fatalf("decoding JWT segment %q: %v", segment, err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("parsing JWT segment %q: %v", raw, err)
+	}
+	return out
 }

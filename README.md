@@ -18,6 +18,7 @@ The following go under `[runners.autoscaler.plugin_config]`:
 | `folder_id` | string | Yes | YC folder the Instance Group and its VMs live in |
 | `config_file` | string | Yes | Path to the `template.yml` instance template — see [Instance Template](#instance-template) |
 | `ssh_file` | string | No | Path to a persistent private SSH key. If unset, a fresh RSA-4096 key pair is generated in memory on every `Init()` instead — see [Connector User](#connector-user) |
+| `key_file` | string | No | Path to an authorized key of a service account (the JSON written by `yc iam key create --output`). If set, the plugin authenticates to the YC API with this key instead of the metadata service — for running the plugin outside Yandex Cloud, see [Running outside Yandex Cloud](#running-outside-yandex-cloud) |
 
 ### Renaming a running group
 
@@ -94,6 +95,19 @@ Required grants (found empirically — YC's `PermissionDenied` errors here carry
 1. `serviceAccount` needs `compute.admin` + `vpc.admin` on the folder — but that's not enough to create an Instance Group specifically. A plain `yc compute instance create` with those two roles succeeds; `yc compute instance-group create` with the identical SA/folder/subnet still fails. Also grant `editor` on the same folder.
 2. `serviceAccount` needs `iam.serviceAccounts.user` granted directly **on the `vmServiceAccount` resource** (`yc iam service-account add-access-binding --id <vm-sa> --role iam.serviceAccounts.user --service-account-id <plugin-sa>`), so it's allowed to attach that SA to instances it creates.
 3. If the subnet's parent network lives in a different folder than the subnet itself (a shared/multi-folder VPC), a folder-level `vpc.user` grant is **not** sufficient for Instance Group creation — plain `compute.instance.create` tolerates it, but `instance-group create` needs `vpc.user` granted at the **cloud** level (`yc resource-manager cloud add-access-binding --id <cloud-id> --role vpc.user --service-account-id <plugin-sa>`).
+
+#### Running outside Yandex Cloud
+
+Off a YC VM (bare metal, on-prem, another cloud) there is no metadata service to take credentials from. Set `key_file` in `[runners.autoscaler.plugin_config]` to an authorized key of the plugin's service account instead:
+
+```sh
+yc iam key create --service-account-id <plugin-sa> --output /etc/gitlab-runner/yc-sa-key.json
+chmod 600 /etc/gitlab-runner/yc-sa-key.json
+```
+
+The plugin then signs its IAM token requests with that key; everything else, including the grants above, stays the same — the key's service account takes the place of the one the management VM would have had attached. A missing or malformed key file fails `Init()` with an error naming `key_file`. The file holds a private key: keep it readable only by the user GitLab Runner runs as.
+
+The runner VMs must also be reachable over SSH from wherever the plugin runs: outside the VPC that usually means `network.nat: true` in `template.yml`, `use_external_addr = true` in `[runners.autoscaler.connector_config]`, and a security group that lets the manager's address in on port 22.
 
 ### Connector User
 
