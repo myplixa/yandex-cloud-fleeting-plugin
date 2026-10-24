@@ -1,6 +1,7 @@
 package fleeting_plugin_yc
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -281,4 +283,53 @@ func decodeJWTSegment(t *testing.T, segment string) map[string]any {
 		t.Fatalf("parsing JWT segment %q: %v", raw, err)
 	}
 	return out
+}
+
+// TestCredentials_WarnsWhenKeyFileIsTooOpen checks that a key_file readable by
+// group/other produces a warning but still works, and that a 0600 file stays
+// silent.
+func TestCredentials_WarnsWhenKeyFileIsTooOpen(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file mode bits are not meaningful on Windows")
+	}
+
+	path := writeServiceAccountKey(t, map[string]string{
+		"id":                 "ajekeyid",
+		"service_account_id": "ajesaid",
+		"key_algorithm":      "RSA_2048",
+		"private_key":        newPrivateKeyPEM(t),
+	})
+
+	cases := []struct {
+		name     string
+		mode     os.FileMode
+		wantWarn bool
+	}{
+		{name: "0600 is silent", mode: 0o600},
+		{name: "0640 warns", mode: 0o640, wantWarn: true},
+		{name: "0644 warns", mode: 0o644, wantWarn: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.Chmod(path, tc.mode); err != nil {
+				t.Fatalf("chmod: %v", err)
+			}
+
+			var out bytes.Buffer
+			g := &InstanceGroup{
+				KeyFile: path,
+				logger:  hclog.New(&hclog.LoggerOptions{Output: &out, Level: hclog.Warn}),
+			}
+
+			if _, err := g.credentials(); err != nil {
+				t.Fatalf("credentials() must not fail on a permissive mode: %v", err)
+			}
+
+			warned := strings.Contains(out.String(), "key_file is readable by group or other")
+			if warned != tc.wantWarn {
+				t.Fatalf("warned = %v, want %v; log: %q", warned, tc.wantWarn, out.String())
+			}
+		})
+	}
 }

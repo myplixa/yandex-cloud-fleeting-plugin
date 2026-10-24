@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path"
+	"runtime"
 	"sync"
 	"text/template"
 
@@ -223,6 +224,8 @@ func (g *InstanceGroup) credentials() (ycsdk.Credentials, error) {
 		return ycsdk.InstanceServiceAccount(), nil
 	}
 
+	g.warnIfKeyFileTooOpen()
+
 	key, err := iamkey.ReadFromJSONFile(g.KeyFile)
 	if err != nil {
 		return nil, fmt.Errorf("reading key_file %q: %w", g.KeyFile, err)
@@ -234,6 +237,27 @@ func (g *InstanceGroup) credentials() (ycsdk.Credentials, error) {
 	}
 
 	return creds, nil
+}
+
+// warnIfKeyFileTooOpen logs a warning when key_file is readable by group or
+// other. The key can create and delete VMs across the whole cloud, so it
+// should be readable only by the user GitLab Runner runs as. It never refuses
+// to start, and the check is skipped on Windows where mode bits carry no
+// meaning.
+func (g *InstanceGroup) warnIfKeyFileTooOpen() {
+	if g.logger == nil || runtime.GOOS == "windows" {
+		return
+	}
+
+	info, err := os.Stat(g.KeyFile)
+	if err != nil {
+		return // a missing/unreadable file is reported by the caller
+	}
+
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		g.logger.Warn("key_file is readable by group or other, restrict it with chmod 600",
+			"key_file", g.KeyFile, "mode", fmt.Sprintf("%#o", perm))
+	}
 }
 
 func (g *InstanceGroup) Init(ctx context.Context, logger hclog.Logger, settings provider.Settings) (provider.ProviderInfo, error) {

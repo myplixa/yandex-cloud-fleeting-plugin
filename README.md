@@ -105,7 +105,7 @@ yc iam key create --service-account-id <plugin-sa> --output /etc/gitlab-runner/y
 chmod 600 /etc/gitlab-runner/yc-sa-key.json
 ```
 
-The plugin then signs its IAM token requests with that key; everything else, including the grants above, stays the same — the key's service account takes the place of the one the management VM would have had attached. A missing or malformed key file fails `Init()` with an error naming `key_file`. The file holds a private key: keep it readable only by the user GitLab Runner runs as.
+The plugin then signs its IAM token requests with that key; everything else, including the grants above, stays the same — the key's service account takes the place of the one the management VM would have had attached. A missing or malformed key file fails `Init()` with an error naming `key_file`. The file holds a private key: keep it readable only by the user GitLab Runner runs as (the plugin logs a warning at startup if the file is readable by group or other, but does not refuse to start).
 
 The runner VMs must also be reachable over SSH from wherever the plugin runs: outside the VPC that usually means `network.nat: true` in `template.yml`, `use_external_addr = true` in `[runners.autoscaler.connector_config]`, and a security group that lets the manager's address in on port 22.
 
